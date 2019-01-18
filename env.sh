@@ -10,12 +10,15 @@
 # export para_usetype=1
 
 #接受kafka消息相关
-export kafka_cluster=['127.0.0.1:9092']
+export kafka_cluster=""
+export l_group_id="ldomaintoip"
+export h_group_id="hdomaintoip"
 # export receive_topic="testtopic"
 # export consume_id="consume1"
 
 # #服务注册和健康度检查相关
-export server_ip="10.246.148.166"
+# export server_ip="10.246.148.166"
+export server_ip="127.0.0.1"
 export server_port="3000"
 export server_name="testservice"
 export server_type="DNS"
@@ -34,7 +37,7 @@ export server_type="DNS"
 
 # export server_meta=["redis_version": "4.0"]
 export heathcheck_args=""
-export heathcheck_path=""
+export heathcheck_path="/health"
 
 
 

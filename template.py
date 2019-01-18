@@ -9,6 +9,8 @@ import aiohttp
 import time
 import os
 import traceback
+# from message_distinguish import message_distinguish as mes_deal
+import uuid
 
 #从环境中获取环境变量
 #API相关
@@ -19,85 +21,55 @@ import traceback
 
 
 # #接受kafka消息相关
-kafka_cluster=os.environ['kafka_cluster']
-# receive_topic=os.environ['receive_topic']
-# consume_id=os.environ['consume_id']
-
-#服务注册和健康度检查相关
-server_ip=os.environ['server_ip']
-server_port=os.environ['server_port']
-server_name=os.environ['server_name']
-server_type=os.environ['server_type']
-server_meta=os.environ['server_meta']
-heathcheck_args=os.environ['heathcheck_args']
-heathcheck_path=os.environ['heathcheck_path']
-
-
+kafka_cluster=["127.0.0.1:9092"]
+h_group_id="h_group"
+l_group_id="l_group"
+control_group_id=str(uuid.uuid1())
+server_controltopic="t1"
+server_hightopic="t2"
+server_lowertopic="t3"
 global server_id
-global server_controltopic
-global server_hightopic
-global server_lowertopic
 global server_state
 
+#服务注册和健康度检查相关
+server_ip="127.0.0.1"
+server_port="3000"
+server_name="test"
+server_type="FBNQ"
+# server_meta=os.environ['server_meta']
+# heathcheck_args=os.environ['heathcheck_args']
+heathcheck_path="/health"
+heathcheck_args={
+    #kafka健康检查
+    "est_num":4
+}
 
-#kafka集群信息
-mes_kafka=['127.0.0.1:9092']
-mes_topic="test"
-
-#consul集群消息
-cs=consul.Consul(host='127.0.0.1',port=8500)
-
-
-history_mes=[]
-
-
-
-
-
-# async def get_deal_mes():
-#     consumer=kafka.KafkaConsumer(mes_topic,group_id="domain_to_ip",bootstrap_servers=mes_kafka)
-#     #阻塞直到获取kafka消息
-#     for item in consumer:
-#         mes=json.loads(item.value.decode('UTF-8'))
-#         print("message get:"+str(mes))
-#         # {
-#         #     "api_par":{
-#         #         "domains":{
-#         #             "baidu.com",
-#         #             "tencent.com",
-#         #             "sohu.com"
-#         #         }
-#         #     },
-#         #     "datadeal_par":{
-#         #         "save_type":"0",#0 topic #1 mongodb #2 redis #3 es
-#         #         "back_topic":"testtopic",
-#         #         "Ip_Port":""
-#         #     }
-#         # }
-        
-#         #通过API获取相应的数据
-#         if mes['api_par'] is not None:
-#             response=await data_get(mes['api_par'])
-#         else:
-#             continue
-
-#         await data_deal(response,mes['datadeal_par'])
+stop_task=set()
 
 
-# async def data_get(api_par):
-#     #DNS正向解析
-#     ip_result=dict()
-#     for domain in api_par['domains']:
-#         ips=set()
-#         async with aiohttp.ClientSession() as session:
-#             async with session.post('http://10.245.146.42:7777/batch?domain='+domain+'&type=A&mode=10') as r:
-#                 t=json.loads(await r.text())
-#                 for item in t['results'][0]['A']:
-#                     for item1 in item['answer list']:
-#                         ips.add(item1['data'])
-#                 ip_result[domain]=list(ips)
-#     temp=json.dumps(ip_result)
-#     return temp
+def mes_deal(mes,flag):
+    if flag==0:
+        if mes['type']=="stop":
+            temp=set(mes['taskid'])
+            stop_task=stop_task|temp
+        else:
+            stop_tak
+
+
+
+
+
+#kafka生产者
+async def sendmes(mes,topic):
+    producer=kafka.KafkaProducer(bootstrap_servers = kafka_cluster)
+    mesg=str(json.dumps(mes)).encode('utf-8')
+    try:
+        producer.send(topic, mesg)
+        print("send data successfully!")
+    except Exception as err:
+        producer.close()
+        print(str(err))
+    producer.close()
 
 #斐波那契实现
 async def fbnq(num):
@@ -117,24 +89,6 @@ async def fbnq(num):
 
 app=Sanic()
 
-# async def deal_mes(mes):
-#     if len(mes) != 0:
-
-#监听消息及消息优先级处理
-
-
-    # for item in consumer:
-    #     mes=json.loads(item.value.decode('UTF-8'))
-    #     print("message get:"+str(mes))
-        
-    #     #对消息进行处理
-    #     await deal_mes(mes)
-
-#控制处理
-
-
-
-
 
 @app.listener('after_server_start')
 async def register_service(app, loop):
@@ -152,12 +106,18 @@ async def register_service(app, loop):
                 "path":heathcheck_path
             }
         }
-
         paras=json.dumps(para)
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post('http://result.eolinker.com/BuQt7kT3de7f2186783e1777a29045300b7b9b29cc0a49c?uri=/service/register',params=paras) as r:
                     temp=json.loads(await r.text())
+                    
+                    global server_id
+                    global server_lowertopic
+                    global server_hightopic
+                    global server_controltopic
+                    global server_state
+
                     server_id=temp['id']
                     server_lowertopic=temp['topic']['low_priority']
                     server_hightopic=temp['topic']['high_priority']
@@ -165,7 +125,7 @@ async def register_service(app, loop):
                     server_state=temp['state']
 
                     if server_state:
-                        logger.info('register service success!  '+'server_id:'+server_id+'server_topic:'+server_lowertopic)
+                        logger.info('register service success!  '+'server_id:'+server_id)
                     else:
                         logger.error('register service fail! Please check the parameters')
                         app.stop()
@@ -176,15 +136,90 @@ async def register_service(app, loop):
     else:
         logger.error('lack the parameter(server_name or server_type) of server to register server !')
         app.stop()
+    
+    mes_always_get()
 
-def mes_get():
-    control_consumer=kafka.KafkaConsumer(server_controltopic,bootstrap_servers=kafka_cluster)
-    lower_consumer=kafka.KafkaConsumer(server_lowertopic,bootstrap_servers=kafka_cluster)
-    hight_consumer=kafka.KafkaConsumer(server_hightopic,bootstrap_servers=kafka_cluster)
+#从指定的topic和group_id中获取一条消息
+def get_one_mes(topic,group_id):
+    try:
+        consumer = kafka.KafkaConsumer(group_id=group_id,bootstrap_servers=kafka_cluster)
+        consumer.subscribe(topics=(topic))
+        mess=consumer.poll(timeout_ms=5,max_records=1)
+        if len(mess)!= 0:
+            for key in mess.keys():
+                mes=json.loads(mess[key][0].value.decode('utf-8'))
+            consumer.close()
+            logger.info("gain one message in "+str(group_id))
+            return mes
+        else:
+            logger.info("no message get in "+str(group_id))
+            consumer.close()
+            return None
+    except Exception as err:
+        consumer.close()
+        logger.error("Error meet during get message in "+str(group_id))
+        traceback.print_exc()
+        return None
 
+#消息获取循环
+def mes_always_get():
+    mes_sign=[]
+    mes_sign.append({
+        "topic":server_controltopic,
+        "flag":0,
+        "group_id":control_group_id
+    })
+    mes_sign.append({
+        "topic":server_hightopic,
+        "flag":1,
+        "group_id":h_group_id
+    })
+    mes_sign.append({
+        "topic":server_lowertopic,
+        "flag":1,
+        "group_id":l_group_id
+    })
 
+    while True:
+        for i in range(0,3):
+            mes=get_one_mes(mes_sign[i]['topic'],mes_sign[i]['group_id'])
+            if mes!=None:
+                print(mes)
+                mes_deal(mes,mes_sign[i]['flag'])
+                break
+            else:
+                continue
+        time.sleep(0.5)
+    # print(consumer.topics())
+    #获取当前client订阅的分区
+    # temp=consumer.assignment()
+    # print(temp)
+    # print(str(temp))
+    # for item in consumer:
+    #     print(str(consumer))
+
+    # for item in temp:
+    #     if item[0]==server_controltopic:
+    #         begin_offset=consumer.beginning_offsets([item])[item]
+    #         end_offset=consumer.end_offsets([item])[item]
+    #         print("begin:"+begin_offset+"end:"+end_offset)
+    #         if end_offset == (begin_offset+1):
+    #             break
+    #         else:
+    #             consumer.seek_to_beginning([item])
+    #             for mess in consumer:
+    #                 logger.info("get one message from controller")
+    #                 mes['type']="control"
+    #                 mes['info']=dict(mess.value.decode('utf-8'))
+    #                 mes=json.loads(mes)
+    #                 break
+    #             break
+                
 @app.get(heathcheck_path)
 async def health_check(request):
+
+    #微服务执行函数的健康检查
+
     return sjson({
         "state":0,
         "infor":"health"
@@ -192,6 +227,7 @@ async def health_check(request):
 
 
 if __name__ == "__main__":
+    # mes_always_get()
     if len(server_ip) != 0 and len(server_port) !=0:
         app.run(server_ip,server_port)
     else:
