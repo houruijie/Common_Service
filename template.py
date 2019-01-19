@@ -11,6 +11,7 @@ import os
 import traceback
 # from message_distinguish import message_distinguish as mes_deal
 import uuid
+import redis
 
 #从环境中获取环境变量
 #API相关
@@ -43,24 +44,222 @@ heathcheck_args={
     #kafka健康检查
     "est_num":4
 }
+#存储任务的redis数据库信息
+redis_ip="127.0.0.1"
+redis_port=6379
 
 stop_task=set()
 
+#将任务执行情况返回给控制处
+def to_control(mes,info):
+    logger.info=info
+    print("mes send to control:"+mes)
 
-def mes_deal(mes,flag):
-    if flag==0:
-        if mes['type']=="stop":
-            temp=set(mes['taskid'])
-            stop_task=stop_task|temp
+#将非空的结果返回给下一消费者群
+def to_next(mes,topic):
+    sendmes(mes,topic)
+
+#将结果存入数据库
+def to_db(store_info,configs):
+    print("存入数据库")
+
+
+#适配API的一些其他参数
+def suit_handle(mes):
+    return mes
+    print("data deal before handle")
+
+
+#API获取数据之后的处理函数
+def getdata_deal(mes):
+    return mes
+    print("data deal after get")
+
+#消息中data的单条数据处理
+async def mes_deal(request):
+    if request ==1:
+        return 1
+    elif request==2:
+        return 1
+    else:
+        a=1
+        b=1
+        while request > 2:
+            c=a
+            a=b
+            b=c+b
+            request=request-1
+        return b
+
+
+
+#依据配置文件微服务执行的速度-->将数据转为API所需要的格式-->处理数据-->获取的数据转为data中的格式
+def mes_predeal(congfig,data):
+    
+    print("deal task")
+    #依据配置文件处理data
+
+
+#解读消息并进行任务数据去重
+def mes_analysis(mes):
+    #判断消息数据是否为空
+    if len(mes['data'])==0:
+        to_control({
+            "info":"init task fail!"
+        },"task data is null")
+    else:
+
+        #判断是否超出了max_depth
+        if mes['output']['depth']>mes['output']['max_depth']:
+            to_control({
+                "type":"finished",
+                "workerid":server_id,
+                "taskid":mes['taskid'],
+                "child_id":mes['childid'],
+                "task_finished":True,
+                "finish_info":"rearch the max depth",
+                "error":False,
+                "err_msg":""
+            },"rearch the max depth")
+            return
         else:
-            stop_tak
+            pass
+        
+        #依据taskid获取此微服务之前执行的任务列表，去除执行过的
+        data=set(mes['data'])
+        try:
+            rd=redis.Redis(host=redis_ip,port=redis_port)
+            #获取set的已有集合长度
+            temp_len=rd.scard(mes['taskid'])
+            temp=set()
+            #除去之前执行过的data
+            if temp_len!=0:
+                temp=rd.smembers(mes['taskid'])
+                data=data-temp
+            else:
+                pass
 
+            if len(data)!=0:
+                #读取配置文件执行任务
+                current_stage=mes['output']['current_stage']
+                current_index=mes['output']['current_index']
+                config=mes['output']['stages'][current_stage]['microservices'][current_index]['config']
+                
+                res=mes_deal(config,data)
+                #返回结果为空
+                if len(res)==0:
+                    to_control({
+                        "type":"finished",
+                        "workerid":server_id,
+                        "taskid":mes['taskid'],
+                        "child_id":mes['childid'],
+                        "task_finished":True,
+                        "finish_info":"find esult is null",
+                        "error":False,
+                        "err_msg":""
+                    },"find result is null")
+                    return
+                else:
 
+                    ms_len=len(mes['output']['stages'][current_stage]['microservices'])
+                    if (ms_len-1)==current_index:
+                        #存入数据库,只有每个stage的最后一个topic才存入数据库
+                        configs=mes['output']['stages'][current_stage]['store']
+                        to_db(res,configs)
+                        #寻找next列表
+                        next=mes['output']['stages'][current_stage]['next']
+                        if len(next)==0:
+                            to_control({
+                                "type":"finished",
+                                "workerid":server_id,
+                                "taskid":mes['taskid'],
+                                "child_id":mes['childid'],
+                                "task_finished":True,
+                                "finish_info":"next list is null",
+                                "error":False,
+                                "err_msg":""
+                            },"next list is null")
+                        else:
+                            depth=mes['ouput']['depth']+1
+                            #在next列表中获取stage并取topic发送消息
+                            for item in next:
+                                topic=mes['output']['stages'][item]['microservices'][0]['topic']
+                                new_mes=mes
+                                new_mes['data']=res
+                                new_mes['output']['current_stage']=item
+                                new_mes['output']['current_index']=0
+                                new_mes['output']['depth']=depth
+                                to_next(new_mes.topic)
+                            to_control({
+                                "type":"running",
+                                "workerid":server_id,
+                                "taskid":mes['taskid'],
+                                "child_id":mes['childid'],
+                                "task_finished":False,
+                                "info":"send mes to next topics",
+                                "error":False,
+                                "err_msg":""
+                            },"send mes to next topics")
+                            return
+                    else:
+                        #当前stage寻找topic
+                        topic=mes['output']['stages'][current_stage]['microservices'][current_index+1]['topic']
+                        new_mes=mes
+                        new_mes['data']=res
+                        new_mes['output']['current_index']=current_index+1
+                        #将消息发送给下一个topic
+                        to_next(new_mes.topic)
+                        #消息反馈
+                        to_control({
+                            "type":"running",
+                            "workerid":server_id,
+                            "taskid":mes['taskid'],
+                            "child_id":mes['childid'],
+                            "task_finished":False,
+                            "info":"send mes to next topic",
+                            "error":False,
+                            "err_msg":""
+                        },"send mes to next topic")
+                        return
+            else:
+                to_control({
+                    "state":"task finish",
+                    "info":"data has been deat"
+                },"task has been deat")
+                return
 
+        except Exception as err:
+            traceback.print_exc()
+            
+#控制消息和执行消息的分类处理
+def mes_classify(mes,flag):
+    if flag==0:
+        temp=set(mes['taskid'])
+        if mes['type']=="stop":
+            stop_task=stop_task|temp
+            to_control({
+                "info":"tasks stop success!"
+            },"tasks stop success")
+            return
+        else:
+            stop_task=stop_task-(stop_task&temp)
+            to_control({
+                "info":"tasks restart success!"
+            },"tasks restart success")
+            return
+    else:
+        if mes['taskid'] in stop_task:
+            to_control({
+                "info":"task has been stop"
+            },"task has been stop")
+            return
+        else:
+            mes_analysis(mes)
+            return
 
 
 #kafka生产者
-async def sendmes(mes,topic):
+def sendmes(mes,topic):
     producer=kafka.KafkaProducer(bootstrap_servers = kafka_cluster)
     mesg=str(json.dumps(mes)).encode('utf-8')
     try:
@@ -71,21 +270,6 @@ async def sendmes(mes,topic):
         print(str(err))
     producer.close()
 
-#斐波那契实现
-async def fbnq(num):
-    if num ==1:
-        return 1
-    elif num==2:
-        return 1
-    else:
-        a=1
-        b=1
-        while num > 2:
-            c=a
-            a=b
-            b=c+b
-            num=num-1
-        return b
 
 app=Sanic()
 
@@ -185,7 +369,7 @@ def mes_always_get():
             mes=get_one_mes(mes_sign[i]['topic'],mes_sign[i]['group_id'])
             if mes!=None:
                 print(mes)
-                mes_deal(mes,mes_sign[i]['flag'])
+                mes_classify(mes,mes_sign[i]['flag'])
                 break
             else:
                 continue
