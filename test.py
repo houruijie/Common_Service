@@ -1,21 +1,62 @@
-#测试程序的执行
+# 测试程序的执行
 from service import Service
+from sanic.response import json
 
-sv=Service("./init.ini")
+sv = Service("./init.ini")
 
 
-def before_request(single_input_item, config):
-    print(single_input_item)
-    return single_input_item
+# @sv.predeal_data()
+# def predeal(data,config):
+#     return data
 
-sv.register_before_request(before_request)
+@sv.before_request()
+def before_request(single_input_item):
+    # print(single_input_item)
+    single_request_item=single_input_item
+    return single_request_item
 
+
+#斐波那契处理函数接受 data_list中单个进行预处理后的输出作为输入,config
+@sv.handle_input_item()
+def handle_input_item(single_request_item):
+    if single_request_item ==1:
+        return 1
+    elif single_request_item==2:
+        return 1
+    else:
+        a=1
+        b=1
+        while single_request_item > 2:
+            c=a
+            a=b
+            b=c+b
+            single_request_item=single_request_item-1
+        return b
+
+
+#将单个处理函数的输出作为输入
+@sv.after_request()
+def after_request(single_response_item):
+    # print(single_response_item)
+    return single_response_item
+
+
+#
+
+#
+
+
+@sv.health_check()
+def health_check(request):
+    return json({
+        "status": "health",
+        "infor": "wwwww"
+    })
 
 
 # data=["121212"]
 # config=None
 # predeal(data,config)
-
 sv.run()
 
 
@@ -55,30 +96,9 @@ sv.run()
 #     return output_item_list
 
 
-
 # service = Service("Cert Collector")
 # service.init(external_api="http://ip:port/path", config="path_to_cofig", **kwargs)
 # servcie.start()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # # 1
@@ -90,7 +110,7 @@ sv.run()
 
 #     return output_item
 
-# # 2  
+# # 2
 # @service.handle_input_item(strategy="evenlet | thread | process")
 # def handle_input_item(input_item_list, config)
 
@@ -103,10 +123,3 @@ sv.run()
 # service = Service("Cert Collector")
 # service.init(config="path_to_cofig", **kwargs)
 # servcie.start()
-
-
-
-
-
-
-
