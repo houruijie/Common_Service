@@ -7,8 +7,9 @@ import logging
 # import sys
 from retrying import retry
 # import asyncio
-from multiprocessing import Process
-from multiprocessing import Pool #多进程
+from multiprocessing import Process #
+from pathos.multiprocessing import ProcessingPool as Pool#多进程
+from multiprocessing import Pool as POOL #多进程
 from multiprocessing.dummy import Pool as ThreadPool #多线程
 # import aiohttp
 import json
@@ -137,6 +138,7 @@ class Service(object):
             print(type(self._process_deal_func))
             #协程和线程则不需要
             self._handle_input_item = func
+            print(type(self._handle_input_item))
             self.strategy=strategy
         return wrapper
     
@@ -201,11 +203,11 @@ class Service(object):
         elif self.strategy == "process":
             #使用多进程来处理数据
             #self._process_deal_func是经过处理的函数
-            part_func=partial(self._process_deal_func,config=config)
+            #part_func=partial(self._handle_input_item,config=config)
             pool=Pool()
-            result_list=pool.map(part_func,data_list)
-            pool.close()
-            pool.join()
+            result_list=pool.map(self._handle_input_item,data_list,config_list)
+            # pool.close()
+            # pool.join()
 
         else:
             self.logger.info("No strategy")
@@ -571,7 +573,7 @@ class Service(object):
         })
 
     # 添加健康检查
-    def add_healthcheck(self):
+    def run_sanic(self):
         try:
             if self._health_check != None:
                 self.app.add_route(self._health_check,
@@ -581,7 +583,7 @@ class Service(object):
                 self.app.add_route(self.default_health_check,
                                    uri=self.healthcheck_path)
             # 添加健康检查的路由
-            # self.app.run(self.service_ip, self.service_port)
+            self.app.run(self.service_ip, self.service_port)
         except Exception:
             self.logger.error(
                 "Error occored during adding healthcheck route of sanic: "+traceback.format_exc())
@@ -598,13 +600,13 @@ class Service(object):
             #     self.p.close()
             #     self.p.join()
             #     return
-            # #添加健康检查
-            # self.add_healthcheck()
-            # #进程池
-            # self.p=Pool(1)
-            # # 新的线程 利用sanic监听健康检查
-            # self.p.apply_async(self.app.run,args=(self.service_ip,self.service_port,),error_callback=run_err_call)
-            # self.p.start()
+            #开启健康检查及sanic服务
+            self.p = Process(target=self.run_sanic)
+            self.p.start()
+
+            #进程池
+            # self.p=POOL()
+            # self.p.apply_async(func=self.run_sanic,args=(),error_callback=run_err_call)
             
             # 注册服务,重试的次数最大为3次，返回true才算成功
             self.resigter_service()
