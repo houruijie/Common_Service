@@ -1,5 +1,5 @@
 from sanic import Sanic
-from sanic.response import json
+from sanic.response import json as sjson
 # from sanic.log import logger
 import configparser
 import traceback
@@ -8,89 +8,84 @@ import logging
 from retrying import retry
 # import asyncio
 from multiprocessing import Process
+from multiprocessing import Pool #多进程
+from multiprocessing.dummy import Pool as ThreadPool #多线程
 # import aiohttp
-import json as nomaljson
+import json
 import requests
 import time
 import uuid
 import kafka
 from Handle_Message import Handle_Message
 from Micro_Logger import deal_log
+import redis
+import os
+import sys
+import eventlet
+from functools import partial
+import copy
+import copyreg
+
+
+#定义全局变量
+KAFKA_SERVER=['127.0.0.1:9092']
+
+SERVICE_IP='127.0.0.1'
+SERVICE_PORT=3000
+SERVICE_META={}
+
+HEALTHCHECK_PATH='/health'
+HEALTHCHECK_ARGS={}
+
+REGISTER_URL='http://result.eolinker.com/BuQt7kT3de7f2186783e1777a29045300b7b9b29cc0a49c?uri=/service/register'
+RETURN_URL='http://mock.eolinker.com/BuQt7kT3de7f2186783e1777a29045300b7b9b29cc0a49c?uri=/worker'
+
+REDIS_IP='127.0.0.1'
+REDIS_PORT=6379
+
+# 用户在初始化时给定了参数则使用用户定义的
+# 没定义则从环境变量中获取
+# 环境变量中没有则使用系统默认的
+
 
 
 class Service(object):
-
-    def __init__(self, config_path):
-
-        self.handle = Handle_Message()
-
-        # 日志输出 将级别为warning的输出到控制台，级别为debug及以上的输出到log.txt文件中
-        logger = logging.getLogger("Service")
-        logger.setLevel(logging.DEBUG)
-        # 输出到文件
-        file_handle = logging.FileHandler("./log.txt", mode='a')
-        # file_handle.setLevel(logging.INFO)
-        # 输出到控制台
-        cmd_handle = logging.StreamHandler()
-        # cmd_handle.setLevel(logging.INFO)
-        # 输出的格式控制
-        formatter = logging.Formatter(
-            "[%(asctime)s] [%(levelname)s] %(message)s")
-        file_handle.setFormatter(formatter)
-        cmd_handle.setFormatter(formatter)
-        # 添加两个输出句柄
-        logger.addHandler(file_handle)
-        logger.addHandler(cmd_handle)
-
-        self.logger = logger
-
-        # 定义钩子函数
-        # 接收消息后的处理
-        self._after_received = None
-        self._before_request = None
-        self._after_request = None
-        self._before_finished = None
-        self._handle_input_item = None
-        self._health_check = None
-
-        # 定义的变量
-        self.app = Sanic()
-        self.config_path = config_path
+    def __init__(self,service_type,service_name,**kwargs): 
         try:
-            cf = configparser.ConfigParser()
-            cf.read(self.config_path)
+            self.kw=kwargs
+            self.app = Sanic()
+            #获取调用该库所在代码的位置
+            current_dir=os.path.abspath(sys.argv[0])
+            xd_dir=current_dir[0:current_dir.rfind('/')+1]
 
-            # 获取kafka集群信息
-            servers = cf.options('kafka_cluster')
-            kafka_cluster = []
-            for item in servers:
-                kafka_cluster.append(cf['kafka_cluster'][item])
-            self.kafka_cluster = kafka_cluster
+            # 日志输出 将级别为warning的输出到控制台，级别为debug及以上的输出到log.txt文件中
+            logger = logging.getLogger("Service")
+            logger.setLevel(logging.DEBUG)
+            file_handle = logging.FileHandler(xd_dir+"log.txt", mode='a')
+            cmd_handle = logging.StreamHandler()
+            formatter = logging.Formatter(
+                "[%(asctime)s] [%(levelname)s] %(message)s")
+            file_handle.setFormatter(formatter)
+            cmd_handle.setFormatter(formatter)
+            logger.addHandler(file_handle)
+            logger.addHandler(cmd_handle)
+            self.logger = logger
 
-            # 获取配置文件中的服务信息
-            self.service_ip = cf['service']['service_ip']
-            self.service_port = cf.getint('service', 'service_port')
-            self.service_name = cf['service']['service_name']
-            self.service_type = cf['service']['service_type']
-            self.healthcheck_path = cf['service']['healthcheck_path']
+            self.service_name=service_name
+            self.service_type=service_type
 
-            # 默认的健康检查路径
-            if len(self.healthcheck_path) == 0:
-                self.healthcheck_path = "/health"
-
-            self.service_meta = dict()
-            if cf.has_section('service_meta'):
-                metas = cf.options('service_meta')
-                for item in metas:
-                    self.service_meta[item] = cf['service_meta'][item]
-
-            self.healthcheck_args = dict()
-            if cf.has_section('healthcheck_args'):
-                args = cf.options('healthcheck_args')
-                for item in args:
-                    self.healthcheck_args[item] = cf['healthcheck_args'][item]
-
-            # 构造服务注册参数
+            self.kafka_cluster=self.get_config(config_name='kafka_cluster',in_user_name='kafka_cluster',in_enviorment_name='kafka_cluster',in_defalut_name=KAFKA_SERVER)
+            self.service_ip=self.get_config('service_ip','service_ip','service_ip',SERVICE_IP)
+            self.service_port=self.get_config('service_port','service_port','service_port',SERVICE_PORT)
+            self.service_meta=self.get_config('service_meta','service_meta','service_meta',SERVICE_META)
+            self.healthcheck_args=self.get_config('healthcheck_args','healthcheck_args','healthcheck_args',HEALTHCHECK_ARGS)
+            self.healthcheck_path=self.get_config('healthcheck_path','healthcheck_path','healthcheck_path',HEALTHCHECK_PATH)
+            self.register_url=self.get_config('register_url','register_url','register_url',REGISTER_URL)
+            self.return_url=self.get_config('return_url','return_url','return_url',RETURN_URL)
+            self.redis_ip=self.get_config('redis_ip','redis_ip','redis_ip',REDIS_IP)
+            self.redis_port=self.get_config('redis_port','redis_port','redis_port',REDIS_PORT)
+            
+            #构造注册函数请求体
             self.server_register_parameter = {
                 "name": self.service_name,
                 "type": self.service_type,
@@ -103,53 +98,60 @@ class Service(object):
                 }
             }
 
-            # 获取服务注册的url
-            self.register_url = cf['register_service']['register_url']
+            #消息处理类所需要的变量
+            self.handle = Handle_Message()
+            self.handle.red = redis.Redis(host=self.redis_ip,port=self.redis_port)
+            self.handle.finished_url=self.return_url
+            self.handle.error_message=""
 
-            # 接收消息后反馈已接收信息url
-            self.return_url = cf['return_message']['return_url']
+            #定义数据处理的钩子函数
+            self._process_deal_func=None
+            self._handle_input_item=None
+            self._handle_input_items=None
+            
+            #健康检查的钩子函数
+            self._health_check = None
 
-        except Exception as e:
-            self.logger.error(
-                "Error ocurred when trying to read config file")
+        except Exception:
+            self.logger.info("Errors melt in the process of initing:  "+traceback.format_exc())
             raise
+    
+    #依次从用户配置、环境变量和系统默认配置中获取配置
+    def get_config(self,config_name,in_user_name,in_enviorment_name,in_defalut_name):
+        if in_user_name in self.kw:
+            temp_config=self.kw[in_user_name]
+            self.logger.info("Use the config of "+config_name+" in the input of user")
+        elif in_enviorment_name in os.environ and len(os.environ[in_enviorment_name]) != 0:
+            temp_config=os.environ[in_enviorment_name]
+            self.logger.info("Use the config of "+config_name+" in enviorment")
+        else:
+            temp_config=in_defalut_name
+            self.logger.info("Use the config of "+config_name+" in the config of default")
+        return temp_config
 
-    # data-->request data预处理装饰器
-
-    def before_request(self):
-        def warrper(func):
-            self._before_request = func
-        return warrper
-
-    # response --> data 处理数据提取
-    def after_request(self):
+    #使用策略处理单条输入数据
+    def handle_input_item(self,strategy=None):
         def wrapper(func):
-            self._after_request = func
-        return wrapper
-
-    # 单条输入data的处理
-    def handle_input_item(self):
-        def wrapper(func):
+            #将func变为可pickle的对象,多进程执行特有
+            self._process_deal_func=copyreg.constructor(func)
+            print(type(self._process_deal_func))
+            #协程和线程则不需要
             self._handle_input_item = func
+            self.strategy=strategy
         return wrapper
-
-    # 健康检查的处理函数
+    
+    #自定义策略处理输入数据
+    def handle_input_items(self):
+        def wrapper(func):
+            self._handle_input_items = func
+        return wrapper
+    
+    #定义健康检查的处理函数
     def health_check(self):
         def wrapper(func):
-            self._health_check = func
+            self._health_check= func
         return wrapper
 
-    # 结束之前进行的操作
-    def before_finish(self):
-        def wrapper(func):
-            self._before_finish = func
-        return wrapper
-
-    # 收到消息之后的操作
-    def after_received(self):
-        def wrapper(func):
-            self._after_received = func
-        return wrapper
 
     def _retry_on_false(result):
         return result is False
@@ -157,7 +159,7 @@ class Service(object):
     @retry(stop_max_attempt_number=3, retry_on_result=_retry_on_false, wait_fixed=2000)
     def send_message(self, mes, topic):
         try:
-            mesg = str(nomaljson.dumps(mes)).encode('utf-8')
+            mesg = str(json.dumps(mes)).encode('utf-8')
             producer = kafka.KafkaProducer(
                 bootstrap_servers=self.kafka_cluster)
             producer.send(topic, mesg)
@@ -171,105 +173,143 @@ class Service(object):
 
     # 依据data_list 和 config
     def deal_data_message(self, data_list, config):
+        self.logger.info("Begin to deal data_list with config")
+        config_list=[config for n in range(len(data_list))]
+        #执行策略有："eventlet | thread | process"
+        #执行策略 先判别单个数据的处理是否存在，若存在则使用策略对单条数据处理
+        #若单条数据处理不存在则使用数据集处理函数
+        start_time=time.time()
+        if self._handle_input_item == None:
+            result_list=self._handle_input_items(data_list,config)
+        elif self.strategy == "eventlet":
+            #使用协程池 处理输入数据
+            
+            result_list=[]
+            pool = eventlet.GreenPool()
+            for res in pool.imap(self._handle_input_item, data_list, config_list):
+                result_list.append(res)
+    
+        elif self.strategy == "thread":
+            #将配置参数统一设置
+            part_func=partial(self._handle_input_item,config=config)
+            #使用多线程来处理输入数据
+            pool = ThreadPool()
+            result_list = pool.map(part_func, data_list)
+            pool.close()
+            pool.join()
 
-        # data_list预处理
-        # print("********************"+str(data_list))
-        request_data = list(map(self._before_request, data_list))
+        elif self.strategy == "process":
+            #使用多进程来处理数据
+            #self._process_deal_func是经过处理的函数
+            part_func=partial(self._process_deal_func,config=config)
+            pool=Pool()
+            result_list=pool.map(part_func,data_list)
+            pool.close()
+            pool.join()
 
-        self.logger.info("the request_data_list:"+str(request_data))
+        else:
+            self.logger.info("No strategy")
+            result_list=[]
+            for item in data_list:
+                result_list.append(self._handle_input_item(item,config))
 
-        response_data = list(map(self._handle_input_item, request_data))
-        print(response_data)
-
-        self.logger.info("the response_data_list:"+str(response_data))
-
-        result_list = list(map(self._before_request, response_data))
-        
-        self.logger.info("the result_data_list:"+str(result_list))
-
+        end_time=time.time()
+        self.logger.info("Time cost: "+str(end_time-start_time)+"s")
+        self.logger.info("The result_list is:"+str(result_list))
         return result_list
 
-    # 消息解读函数
-
+    #  消息解读函数
     def interpretate_message(self, message, message_type, serviceid, worktype, redis_ip="127.0.0.1", redis_port=6379):
         if message_type == 0:  # to control message handle
             self.handle.handle_control_message(message)
             return
-        self.handle.initialize(serviceid, message, redis_ip, redis_port)
+        #获取变量
+        wokerid =self.service_id
+        worker_type =self.service_type
+
+        stage = message['output']['current_stage']
+        index = message['output']['current_index']
+        next_list = message['output']['stages'][stage]['next']
+        store_list = message['output']['stages'][stage]['store']
+        server_list = message['output']['stages'][stage]['microservices']
+        taskid = message["taskid"]
+        childid = message["childid"]
+        input_list = message['data']
+        topic = message['output']["stages"][stage]["microservices"][index]["topic"]
+        config = message['output']["stages"][stage]["microservices"][index]["config"]
+        
+        
+        # self.handle.initialize(serviceid, message, redis_ip, redis_port)
         output_flag = False  # if output_flag is true, stage finished, need to out put
         try:
-            if self.handle.stage_position_judge():
+            if index+1 >= len(server_list):
                 self.logger.info("judge is OK")
                 output_flag = True
-                if not self.handle.next_list and not self.handle.store_list:
-                    self.handle.send_finished_message(self.handle.wokerid, self.handle.worker_type, 0, 0,
-                                                      self.handle.taskid, self.handle.childid, "finished", self.handle.error_message)
+                if not next_list and not store_list:
+                    self.handle.send_finished_message(wokerid, worker_type, 0, 0,
+                                                      taskid, childid, "finished", self.handle.error_message+"both next and store are null")
                     return
                 message['output']['depth'] = message['output']['depth'] + 1
         except Exception as e:
             # print("----------------------------"+str(self.handle.message))
             self.logger.error("something in message need")
-            self.handle.error_message = self.handle.error_message + \
-                ";" + str(e)
+            self.handle.error_message = self.handle.error_message + ";" + str(e)
         if message['output']['depth'] >= message['output']['max_depth']:
-            self.handle.send_finished_message(self.handle.wokerid, self.handle.worker_type, 0, 0, self.handle.taskid,
-                                              self.handle.childid, "finished", self.handle.error_message)
+            self.handle.send_finished_message(wokerid, worker_type, 0, 0, taskid,
+                                              childid, "finished", self.handle.error_message)
             return
         # check config, decide use redis or not
-        framework_config = self.handle.config.get('framework', None)
+        framework_config = config.get('framework', None)
         if framework_config is None:
             redis_config = True
         else:
             redis_config = framework_config.get("redis", True)
         if redis_config is True:
-            self.handle.info_list = self.handle.calculate_different_set(
-                set(self.handle.input_list), self.handle.topic + "_" + self.handle.taskid)
+            info_list = self.handle.calculate_different_set(
+                set(input_list), topic + "_" + taskid)
         else:
-            self.handle.info_list = self.handle.input_list
-        if len(self.handle.info_list) <= 0:
-            self.handle.send_finished_message(self.handle.wokerid, self.handle.worker_type, len(self.handle.info_list), 0, self.handle.taskid,
-                                              self.handle.childid, "finished", self.handle.error_message)
+            info_list = input_list
+        if len(info_list) <= 0:
+            self.send_finished_message(wokerid, worker_type, len(info_list), 0, taskid,
+                                              childid, "finished", self.handle.error_message)
             return
         result_list = self.deal_data_message(
-            self.handle.info_list, self.handle.config.get("service", {}))
+            info_list, config.get("service", {}))
         try:
             # 处于stage的最后一个阶段，需要将数据输出到数据库和next指定的下一个stage的第一个微服务中
             if output_flag is True:
                 try:
-                    self.handle.store(self.handle.store_list,
-                                      self.handle.info_list, result_list)
+                    self.handle.store(store_list,info_list, result_list)
                 except Exception as e:
                     self.l_group_id.error("the db error")
-                    raise Exception("the db error")
+                    self.handle.error_message=self.handle.error_message+";the db error"
                 finished_flag = True
-                for n in self.handle.next_list:  # next字段有值
+                for n in next_list:  # next字段有值
                     finished_flag = False
-                    self.handle.send_msg_kafka()
+                    self.send_message(message,topic)
                 if finished_flag is True:
-                    self.handle.send_finished_message(self.handle.wokerid, self.handle.worker_type, len(self.handle.info_list), len(result_list),
-                                                      self.handle.taskid, self.handle.childid, "finished", self.error_message)
+                    self.handle.send_finished_message(wokerid, worker_type, len(info_list), len(result_list),
+                                                      taskid, childid, "finished", self.handle.error_message)
                 else:
-                    self.handle.send_finished_message(self.handle.wokerid, self.handle.worker_type, len(self.handle.info_list), len(result_list),
-                                                      self.handle.taskid, self.handle.childid, "running", self.handle.error_message)
+                    self.handle.send_finished_message(wokerid, worker_type, len(info_list), len(result_list),
+                                                      taskid, childid, "running", self.handle.error_message)
                 return
             # 不是微服务的最后一个阶段，需要将数据放到data中，通过kafka传递给下一个微服务
             else:
                 message["data"] = result_list
                 message["output"]["current_index"] = message["output"]["current_index"] + 1
-                self.send_message(self.handle.message, self.handle.topic)
-                self.handle.send_finished_message(self.handle.wokerid, self.handle.worker_type, len(self.handle.info_list), len(result_list),
-                                                  self.handle.taskid, self.handle.childid, "running", self.handle.error_message)
+                self.send_message(message, topic)
+                self.handle.send_finished_message(wokerid, worker_type, len(info_list), len(result_list),
+                                                  taskid, childid, "running", self.handle.error_message)
                 return
         except Exception as e:
-            self.handle.error_message = self.handle.error_message + \
-                ":" + str(e)
+            self.handle.error_message = self.handle.error_message + ":" + str(e)
             traceback.print_exc()
 
         self.handle.insert_redis(
-            set(self.handle.info_list), self.handle.topic + "_" + self.handle.taskid)
+            set(info_list), topic + "_" + taskid)
 
     # 对消息的完整性进行检验
-
     def message_check(self, message, message_type):
         if message_type == 1:
             try:
@@ -377,10 +417,11 @@ class Service(object):
             "status": "finished",
             "error_msg": info
         }
-        parametas = nomaljson.dumps(send_message)
+        parametas = json.dumps(send_message)
         try:
             ret = requests.put(self.return_url, params=parametas, timeout=2)
             temp = ret.json()
+            self.logger.info("after sending finished message: "+str(temp))
             if temp['state'] == 0:
                 self.logger.info("task finished")
                 return True
@@ -413,12 +454,14 @@ class Service(object):
             "childid": temp_childid,
             "task_message": message
         }
-        parametas = nomaljson.dumps(send_message)
+        parametas = json.dumps(send_message)
         try:
             ret = requests.put(self.return_url, params=parametas, timeout=2)
+            
             temp = ret.json()
+            self.logger.info(str(temp))
             if temp['state'] == 0 and temp['status'] == "running":
-                self.logger.info("the task need to be done")
+                self.logger.info("The task need to be done")
                 return True
             else:
                 return False
@@ -428,129 +471,107 @@ class Service(object):
             return False
             raise
 
-    # 监听一条消息
-    def listen_one_message(self, topic, group_id):
-        try:
-            temp_result = None
-            consumer = kafka.KafkaConsumer(
-                group_id=group_id, bootstrap_servers=self.kafka_cluster)
-            consumer.subscribe(topics=(topic))
-            message = consumer.poll(timeout_ms=5, max_records=1)
-            if len(message) != 0:
-                for key in message.keys():
-                    message = nomaljson.loads(
-                        message[key][0].value.decode('utf-8'))
-                    if group_id != self.c_group_id:
-                        self.logger.info("gain one message in "+str(group_id))
-                    else:
-                        self.logger.info("gain one message in c_group")
-                temp_result = message
+    #消息获取之后完整性检查及反馈消息的处理
+    def predeal_message(self,message):
+        self.logger.info("Sending message back to the controller")
+        if self.send_received_message(message):
+            self.logger.info("Checking the received message")
+            if self.message_check(message, 1)[0]:
+                # 之后这边是调用侯的代码
+                self.interpretate_message(
+                    message, 1, self.service_id, self.service_type)
             else:
-                if group_id != self.c_group_id:
-                    self.logger.info("no message get in "+str(group_id))
-                else:
-                    self.logger.info("no message get in c_group")
-        except Exception as err:
+                info = self.message_check(
+                    message, 1)[1]
+                self.logger.warning(
+                    "Errors occored while checking the message: "+info)
+                # if mes_sign[i]['message_type'] == 1:
+                self.send_finish_message(message, info)
+        else:
             self.logger.error(
-                "Error meet during get message:  "+traceback.format_exc())
-            raise
-        finally:
-            consumer.close()
-            return temp_result
+                "Parameter missed or errors melt in sending received message")
 
     # kafka消息获取
-
     def listen_message(self):
-        mes_sign = [{
-            "topic": self.service_controltopic,
-            "message_type": 0,
-            "group_id": self.c_group_id
-        }, {
-            "topic": self.service_hightopic,
-            "message_type": 1,
-            "group_id": self.h_group_id
-        }, {
-            "topic": self.service_lowertopic,
-            "message_type": 1,
-            "group_id": self.l_group_id
-        }]
-        while True:
-            for i in range(0, 3):
-                message = self.listen_one_message(
-                    mes_sign[i]['topic'], mes_sign[i]['group_id'])
-                try:
-                    if message != None:
-                        # print(type(message))
-                        # print(message)
+        consumer = kafka.KafkaConsumer(
+                group_id=self.task_group_id, bootstrap_servers=self.kafka_cluster)
+        self.logger.info("high_topic:  "+str(self.service_high_topic))
+        self.logger.info("lower_topic:  "+str(self.service_lower_topic))
+        try:
+            while True:
+                self.logger.info("Listening the high topic message")
+                consumer.subscribe(topics=[self.service_high_topic])
+                message = consumer.poll(timeout_ms=5, max_records=1)
+                if len(message)>0:
+                    for key in message.keys():
+                        message = json.loads(
+                            message[key][0].value.decode('utf-8'))
+                    self.logger.info("the message received in high topic:"+str(message))
+                    self.predeal_message(message)
+                    consumer.commit()
+                    continue
+                consumer.subscribe(topics=[self.service_lower_topic,self.service_high_topic])
+                
+                while True:
+                    self.logger.info("Listening the high and lower topic message")
+                    message = consumer.poll(timeout_ms=5,max_records=1)
+                    if len(message)==0:
+                        time.sleep(0.5)
+                        continue
+                    for key in message.keys():
+                        message = json.loads(message[key][0].value.decode('utf-8'))
+                    self.logger.info("the message received in high or lower topic:"+str(message))
+                    self.predeal_message(message)
+                    consumer.commit()
+                    break
 
-                        self.logger.info("the message receive: "+str(message))
-
-                        self.logger.info("sending receiving message")
-                        if self.send_received_message(message):
-                            self.logger.info("checing the received message")
-                            if self.message_check(message, mes_sign[i]['message_type'])[0]:
-                                # 之后这边是调用侯的代码
-                                self.interpretate_message(
-                                    message, mes_sign[i]['message_type'], self.service_id, self.service_type)
-                            else:
-                                info = self.message_check(
-                                    message, mes_sign[i]['message_type'])[1]
-                                self.logger.warning(
-                                    "errors occored while checking the message: "+info)
-                                if mes_sign[i]['message_type'] == 1:
-                                    self.send_finish_message(message, info)
-                        else:
-                            self.logger.error(
-                                "parameter missing or error in sending received message")
-                        break
-                except Exception as err:
-                    raise
-            time.sleep(1)
+        except Exception:
+            self.logger.info("Errors occored while polling or dealing the message:  "+traceback.format_exc())
+            raise
 
     # 同步服务注册
     # 如果返回false  重试3次
-
     @retry(stop_max_attempt_number=3, retry_on_result=_retry_on_false, wait_fixed=2000)
     def resigter_service(self):
-        parametas = nomaljson.dumps(self.server_register_parameter)
+        parametas = json.dumps(self.server_register_parameter)
         try:
             # 设置的超时时间为两秒
             ret = requests.post(self.register_url, params=parametas, timeout=2)
             temp = ret.json()
             self.service_id = temp['id']
             # print(self.service_id)
-            self.service_lowertopic = temp['topic']['low_priority']
-            self.service_hightopic = temp['topic']['high_priority']
-            self.service_controltopic = temp['topic']['controller']
+            self.service_lower_topic = temp['topic']['low_priority']
+            self.service_high_topic = temp['topic']['high_priority']
+            # self.service_controltopic = temp['topic']['controller']
             # 控制消息每次微服务启动时都不一致保证所有微服务都能接收到消息
-            self.c_group_id = str(uuid.uuid1())
-            self.h_group_id = "h_group"  # 高优先级group
-            self.l_group_id = "l_group"  # 低优先级group
+            # self.c_group_id = str(uuid.uuid1())
+            self.task_group_id = "task_group"  # 高优先级group
+            # self.l_group_id = "l_group"  # 低优先级group
             self.service_state = temp['state']
             # print(type(self.service_state))
             # print(self.service_state)
             if self.service_state is True:
-                self.logger.info('register service success!')
+                self.logger.info('Registered service successfully!')
                 return True
             else:
                 self.logger.error(
-                    'service register fail with the return of service manager')
+                    'Registered service unsuccessfully with the fail of service manager')
                 return False
         except Exception:
-            self.logger.error('service register fail   ' +
+            self.logger.error('Registered service unsuccessfully   ' +
                               traceback.format_exc())
             raise
             return False
 
     # 默认的健康检查信息
     async def default_health_check(self, request):
-        return json({
+        return sjson({
             "state": "health",
             "info": "service is healthy"
         })
 
-    # 开启sanic
-    def start_sanic(self):
+    # 添加健康检查
+    def add_healthcheck(self):
         try:
             if self._health_check != None:
                 self.app.add_route(self._health_check,
@@ -560,32 +581,36 @@ class Service(object):
                 self.app.add_route(self.default_health_check,
                                    uri=self.healthcheck_path)
             # 添加健康检查的路由
-            self.app.run(self.service_ip, self.service_port)
-        except Exception as e:
+            # self.app.run(self.service_ip, self.service_port)
+        except Exception:
             self.logger.error(
-                "Error occored during starting sanic: "+traceback.format_exc())
+                "Error occored during adding healthcheck route of sanic: "+traceback.format_exc())
             raise
 
     # 服务运行
     def run(self):
         try:
-                # 函数预处理是否已经写好
-
-                # 函数执行是否已经写好
-
-                # 函数获取的数据提取是否已经写好
-
-                # 新的线程 利用sanic监听健康检查
-            # self.p = Process(target=self.start_sanic)
+            if self._handle_input_item == None and self._handle_input_items == None:
+                self.logger.error("No handling function")
+                return
+            # def run_err_call():
+            #     self.logger.info("Errors melt in running sainc")
+            #     self.p.close()
+            #     self.p.join()
+            #     return
+            # #添加健康检查
+            # self.add_healthcheck()
+            # #进程池
+            # self.p=Pool(1)
+            # # 新的线程 利用sanic监听健康检查
+            # self.p.apply_async(self.app.run,args=(self.service_ip,self.service_port,),error_callback=run_err_call)
             # self.p.start()
-            temp = self.resigter_service()
+            
             # 注册服务,重试的次数最大为3次，返回true才算成功
-            if temp:
-                self.listen_message()
-            else:
-                self.logger.error(
-                    "Can't register the service after retrying three times")
-
+            self.resigter_service()
+            
+            #监听消息
+            self.listen_message()
         except Exception as err:
             self.logger.error(
                 "Error occored while running the main process:  "+traceback.format_exc())
